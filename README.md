@@ -1,5 +1,8 @@
 # bcm4360-softap
 
+[![CI](https://github.com/nivobi/bcm4360-softap/actions/workflows/ci.yml/badge.svg)](https://github.com/nivobi/bcm4360-softap/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 An **open WiFi hotspot on a Broadcom BCM4360 under Linux**, with Broadcom's
 closed `wl` driver, which officially only does client mode.
 
