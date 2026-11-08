@@ -73,7 +73,8 @@ symbols and adds aliases for the originals. The original file is left as is.
 ## Hard-won rules
 
 - **Never send beacons or probe responses by hand** (frame types `0x80`,
-  `0x50`). The chip locks up the whole PC. `wl.py` refuses them.
+  `0x50`). The chip locks up the whole PC. The patched driver refuses them in
+  both send commands, and `wl.py` refuses them too.
 - **Never switch the live card from ad-hoc back to client mode** (down,
   infra 1, up). That froze the PC too. Stopping the hotspot means **reloading
   the driver** (`modprobe -r wl && modprobe wl`).
@@ -92,9 +93,21 @@ symbols and adds aliases for the originals. The original file is left as is.
   channels (52-144) in client mode**, whatever the regulatory domain says. A
   router that only offers those is invisible to this card.
 
+## Security
+
+The hotspot is **open**: anyone in range can join it and reach every service
+listening on this PC at `10.42.0.1` (SSH, web servers, ...). It does **not**
+route to the internet or your LAN (no forwarding, no NAT). Keep it up only as
+long as you need it, or firewall the `softap0` interface down to the ports your
+page needs.
+
 ## Limits
 
 - **Open network only.** No WPA2: the 4-way handshake isn't implemented.
+- Fixed addresses: `10.42.0.1/24` with DHCP from `.10` to `.50`. Change
+  `GATEWAY` and the dnsmasq range in `softap.py` if your LAN uses that range.
+- Expects systemd, NetworkManager and wpa_supplicant: stopping the hotspot
+  reloads `wl` and restarts both.
 - One blob version, 2.4 GHz, one radio for either hotspot or client.
 - Speed and many stations are untested; it is meant for a setup page.
 - Very small frames (under 24 bytes, such as PS-Poll) are dropped by the
@@ -104,7 +117,10 @@ symbols and adds aliases for the originals. The original file is left as is.
 ## Use it
 
 You need root, `objcopy` (binutils), dkms, the `broadcom-wl-dkms` package,
-dnsmasq, and Python 3.10 or newer.
+dnsmasq, and Python 3.10 or newer. `build-wl.sh` uses Arch's paths
+(`/usr/src/broadcom-wl-6.30.223.271`, `/usr/lib/broadcom-wl-dkms`); on other
+distributions (Debian/Ubuntu: `broadcom-sta-dkms`) adjust `SRC`, `LIB` and the
+dkms name at the top of the script. Run everything from the repository folder.
 
 ```sh
 # 1. Build the patched driver (checks the blob, keeps .orig copies of the originals)
@@ -144,6 +160,14 @@ The parameter and ioctl names start with `buzz_` because the hack was built
 for [Buzz Party](https://github.com/nivobi/buzz-party), where a console PC
 uses it to let the host pick the house WiFi from a phone. They are kept as
 they are, so the code here is exactly what was tested.
+
+## Issues and contributions
+
+Reports are welcome, especially "it works / doesn't on card X, distribution Y,
+phone Z" and Android results. Other chips and other blob versions are **not
+supported**; if you adapt it, a pull request with your findings is the best way
+to help the next person. Please report anything security related privately
+(the repository's **Security** tab).
 
 ## License
 

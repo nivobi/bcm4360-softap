@@ -1,5 +1,5 @@
---- src/wl/sys/wl_linux.c.orig	2026-11-08 04:29:45.416167231 +0100
-+++ src/wl/sys/wl_linux.c	2026-11-08 04:42:22.980266057 +0100
+--- src/wl/sys/wl_linux.c.orig
++++ src/wl/sys/wl_linux.c
 @@ -448,6 +448,16 @@
  
  #if defined(WL_USE_NETDEV_OPS)
@@ -40,7 +40,7 @@
  };
  #endif 
  
-@@ -1630,6 +1646,154 @@
+@@ -1630,6 +1646,157 @@
  	return (0);
  }
  
@@ -184,6 +184,9 @@
 +	sa = cfg + 0xf6;
 +	qi = *(void **)(*(uint8 **)(cfg + 0x10) + 0x18);
 +	fc = buf[0] | (buf[1] << 8);
++	/* Beacons and probe responses sent by hand hang the whole PC: never by hand. */
++	if ((fc & 0xfc) == 0x80 || (fc & 0xfc) == 0x50)
++		return BCME_BADARG;
 +	pkt = wlc_frame_get_mgmt(wlc, fc, buf + 2, sa, sa, len - 8, &body);
 +	if (!pkt || !body)
 +		return BCME_NOMEM;
@@ -195,7 +198,7 @@
  int
  wl_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
  {
-@@ -1691,7 +1855,19 @@
+@@ -1691,7 +1858,19 @@
  	if (!capable(CAP_NET_ADMIN)) {
  		bcmerror = BCME_EPERM;
  	} else {
