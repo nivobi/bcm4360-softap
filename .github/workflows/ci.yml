@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.10', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Tests (no hardware needed)
+        run: python -m unittest -v
+      - name: Byte-compile everything
+        run: python -m compileall -q bcmsoftap
+      - name: Shell script syntax
+        run: bash -n driver/build-wl.sh

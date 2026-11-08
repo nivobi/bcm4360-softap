@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+# Never commit Broadcom binaries
+*.o_shipped
+*.ko

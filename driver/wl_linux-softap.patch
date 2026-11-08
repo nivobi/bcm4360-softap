@@ -1,0 +1,218 @@
+--- src/wl/sys/wl_linux.c.orig	2026-11-08 04:29:45.416167231 +0100
++++ src/wl/sys/wl_linux.c	2026-11-08 04:42:22.980266057 +0100
+@@ -448,6 +448,16 @@
+ 
+ #if defined(WL_USE_NETDEV_OPS)
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
++/* Since 5.15 the kernel sends SIOCDEVPRIVATE to ndo_siocdevprivate, not
++ * ndo_do_ioctl, so Broadcom's private wl ioctls never arrived. */
++static int
++wl_siocdevprivate(struct net_device *dev, struct ifreq *ifr, void __user *data, int cmd)
++{
++	return wl_ioctl(dev, ifr, cmd);
++}
++#endif
++
+ static const struct net_device_ops wl_netdev_ops =
+ {
+ 	.ndo_open = wl_open,
+@@ -460,14 +470,20 @@
+ #else
+ 	.ndo_set_multicast_list = wl_set_multicast_list,
+ #endif
+-	.ndo_do_ioctl = wl_ioctl
++	.ndo_do_ioctl = wl_ioctl,
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
++	.ndo_siocdevprivate = wl_siocdevprivate,
++#endif
+ };
+ 
+ static const struct net_device_ops wl_netdev_monitor_ops =
+ {
+ 	.ndo_start_xmit = wl_monitor_start,
+ 	.ndo_get_stats = wl_get_stats,
+-	.ndo_do_ioctl = wl_ioctl
++	.ndo_do_ioctl = wl_ioctl,
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
++	.ndo_siocdevprivate = wl_siocdevprivate,
++#endif
+ };
+ #endif 
+ 
+@@ -1630,6 +1646,154 @@
+ 	return (0);
+ }
+ 
++/* --- softap: make the firmware's ad-hoc beacons look like an AP. ---
++ * The closed core builds beacon and probe-response bodies in wlc_bcn_prb_body
++ * (made weak with objcopy; the original is kept as buzz_orig_bcn_prb_body).
++ * Body layout: 8 timestamp, 2 interval, 2 capability, then elements. */
++static int buzz_fake_ess = 0;
++static uint8 buzz_last_bcn[1024];
++static int buzz_last_bcn_len;
++module_param(buzz_fake_ess, int, 0644);
++MODULE_PARM_DESC(buzz_fake_ess, "Advertise ad-hoc beacons as a normal access point");
++
++extern void buzz_orig_bcn_prb_body(void *wlc, int type, void *cfg, uint8 *buf, int *len, int short_preamble);
++
++void wlc_bcn_prb_body(void *wlc, int type, void *cfg, uint8 *buf, int *len, int short_preamble);
++void
++wlc_bcn_prb_body(void *wlc, int type, void *cfg, uint8 *buf, int *len, int short_preamble)
++{
++	int off, avail = len ? *len : 0, ds_end = -1;
++
++	buzz_orig_bcn_prb_body(wlc, type, cfg, buf, len, short_preamble);
++	if (!buzz_fake_ess || !buf || !len || *len < 12)
++		return;
++	buf[10] = (buf[10] & ~0x03) | 0x01;	/* capability: ESS, not IBSS */
++	off = 12;				/* drop the IBSS Parameter Set element (id 6) */
++	while (off + 2 <= *len) {
++		int ielen = 2 + buf[off + 1];
++		if (off + ielen > *len)
++			break;
++		if (buf[off] == 6) {
++			memmove(buf + off, buf + off + ielen, *len - off - ielen);
++			*len -= ielen;
++			continue;
++		}
++		if (buf[off] == 3)
++			ds_end = off + ielen;
++		off += ielen;
++	}
++	/* buzz TIM: beacons from an AP carry a Traffic Indication Map (id 5);
++	 * phones leave a network whose beacons lack it. Insert it after the
++	 * DS Parameter Set: DTIM count 0, period 1, no buffered traffic. */
++	if (type == 0x80 && *len + 6 <= avail) {
++		int at = ds_end > 0 ? ds_end : *len;
++		static const uint8 tim[6] = { 5, 4, 0, 1, 0, 0 };
++		memmove(buf + at + 6, buf + at, *len - at);
++		memcpy(buf + at, tim, 6);
++		*len += 6;
++	}
++	if (type == 0x80 && *len > 0 && *len <= (int)sizeof(buzz_last_bcn)) {
++		memcpy(buzz_last_bcn, buf, *len);
++		buzz_last_bcn_len = *len;
++	}
++}
++
++/* --- softap: the ad-hoc firmware kicks out stations it does not
++ * know (deauth / disassoc). Log every call and block it while faking an AP.
++ * Both take at most 6 register arguments, so a pass-through is safe. */
++static int buzz_block_kick = 0;
++module_param(buzz_block_kick, int, 0644);
++MODULE_PARM_DESC(buzz_block_kick, "Block deauth/disassoc frames while faking an AP");
++
++extern int buzz_orig_senddeauth(long a, long b, long c, long d, long e, long f);
++extern int buzz_orig_senddisassoc(long a, long b, long c, long d, long e, long f);
++int wlc_senddeauth(long a, long b, long c, long d, long e, long f);
++int wlc_senddisassoc(long a, long b, long c, long d, long e, long f);
++
++int
++wlc_senddeauth(long a, long b, long c, long d, long e, long f)
++{
++	int block = buzz_fake_ess && buzz_block_kick;
++	printk(KERN_INFO "buzz: senddeauth from %pS reason=%ld %s\n",
++		__builtin_return_address(0), f, block ? "BLOCKED" : "sent");
++	if (block)
++		return 1;
++	return buzz_orig_senddeauth(a, b, c, d, e, f);
++}
++
++int
++wlc_senddisassoc(long a, long b, long c, long d, long e, long f)
++{
++	int block = buzz_fake_ess && buzz_block_kick;
++	printk(KERN_INFO "buzz: senddisassoc from %pS reason=%ld %s\n",
++		__builtin_return_address(0), f, block ? "BLOCKED" : "sent");
++	if (block)
++		return 1;
++	return buzz_orig_senddisassoc(a, b, c, d, e, f);
++}
++
++/* --- softap: send a hand-made 802.11 management frame. ---
++ * The closed core has these (as local symbols, made global with objcopy).
++ * Signatures and struct offsets read from the core's own callers
++ * (wlc_send_action_err). */
++#define WL_BUZZ_TX_MGMT 0x7B00
++extern void *wlc_frame_get_mgmt(void *wlc, uint16 fc, const void *da, const void *sa,
++	const void *bssid, uint body_len, uint8 **pbody);
++extern int wlc_sendmgmt(void *wlc, void *p, void *qi, void *scb);
++
++#define WL_BUZZ_TX_MGMT2 0x7B01
++/* buf: 2 bytes frame control, 6 destination, 6 sender, 6 BSSID, then the body. */
++static int
++wl_buzz_tx_mgmt2(wl_info_t *wl, uint8 *buf, uint len)
++{
++	void *wlc = (void *)wl->wlc;
++	uint8 *cfg, *body = NULL;
++	void *qi, *pkt;
++	uint16 fc;
++
++	if (len < 20)
++		return BCME_BUFTOOSHORT;
++	cfg = *(uint8 **)((uint8 *)wlc + 0x2f8);
++	if (!cfg)
++		return BCME_NOTREADY;
++	qi = *(void **)(*(uint8 **)(cfg + 0x10) + 0x18);
++	fc = buf[0] | (buf[1] << 8);
++	/* Beacons and probe responses sent by hand hang the whole PC: never by hand. */
++	if ((fc & 0xfc) == 0x80 || (fc & 0xfc) == 0x50)
++		return BCME_BADARG;
++	pkt = wlc_frame_get_mgmt(wlc, fc, buf + 2, buf + 8, buf + 14, len - 20, &body);
++	if (!pkt || !body)
++		return BCME_NOMEM;
++	memcpy(body, buf + 20, len - 20);
++	wlc_sendmgmt(wlc, pkt, qi, NULL);
++	return 0;
++}
++
++/* buf: 2 bytes frame control (little endian), 6 bytes destination, then the body. */
++static int
++wl_buzz_tx_mgmt(wl_info_t *wl, uint8 *buf, uint len)
++{
++	void *wlc = (void *)wl->wlc;
++	uint8 *cfg, *sa, *body = NULL;
++	void *qi, *pkt;
++	uint16 fc;
++
++	if (len < 8)
++		return BCME_BUFTOOSHORT;
++	cfg = *(uint8 **)((uint8 *)wlc + 0x2f8);
++	if (!cfg)
++		return BCME_NOTREADY;
++	sa = cfg + 0xf6;
++	qi = *(void **)(*(uint8 **)(cfg + 0x10) + 0x18);
++	fc = buf[0] | (buf[1] << 8);
++	pkt = wlc_frame_get_mgmt(wlc, fc, buf + 2, sa, sa, len - 8, &body);
++	if (!pkt || !body)
++		return BCME_NOMEM;
++	memcpy(body, buf + 8, len - 8);
++	wlc_sendmgmt(wlc, pkt, qi, NULL);
++	return 0;
++}
++
+ int
+ wl_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
+ {
+@@ -1691,7 +1855,19 @@
+ 	if (!capable(CAP_NET_ADMIN)) {
+ 		bcmerror = BCME_EPERM;
+ 	} else {
+-		bcmerror = wlc_ioctl(wl->wlc, ioc.cmd, buf, ioc.len, wlif->wlcif);
++		if (ioc.cmd == 0x7B02 && buf && ioc.len >= 4) {
++			int n = buzz_last_bcn_len;
++			if (n > (int)ioc.len - 4)
++				n = ioc.len - 4;
++			memcpy(buf, &buzz_last_bcn_len, 4);
++			memcpy((uint8 *)buf + 4, buzz_last_bcn, n);
++			bcmerror = 0;
++		} else if (ioc.cmd == WL_BUZZ_TX_MGMT2 && buf)
++			bcmerror = wl_buzz_tx_mgmt2(wl, (uint8 *)buf, ioc.len);
++		else if (ioc.cmd == WL_BUZZ_TX_MGMT && buf)
++			bcmerror = wl_buzz_tx_mgmt(wl, (uint8 *)buf, ioc.len);
++		else
++			bcmerror = wlc_ioctl(wl->wlc, ioc.cmd, buf, ioc.len, wlif->wlcif);
+ 	}
+ 	WL_UNLOCK(wl);
+ 
